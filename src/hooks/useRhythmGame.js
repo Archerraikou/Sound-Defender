@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { usePdAudio } from "./usePdAudio";
 import {
   CAMERA_CONFIG,
   ENEMIES_CONFIG,
@@ -14,6 +15,7 @@ import { createEnemy, disposeEnemy, respawnEnemy } from "../utils/enemy";
 import { getEnemyUiScale, getHitResult } from "../utils/timing";
 
 export function useRhythmGame(mountRef, ringRef) {
+  const { init: initAudio, playJudgement } = usePdAudio();
   const frameRef = useRef(null);
   const enemiesRef = useRef({});
   const flashTimeoutRef = useRef(null);
@@ -37,6 +39,10 @@ export function useRhythmGame(mountRef, ringRef) {
     visible: false,
     id: 0,
   });
+
+  useEffect(() => {
+    initAudio();
+  }, []);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -193,6 +199,7 @@ export function useRhythmGame(mountRef, ringRef) {
             visible: true,
             id: now,
           });
+          playJudgement("miss");
 
           if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
           setFlash("player-hit");
@@ -298,6 +305,7 @@ export function useRhythmGame(mountRef, ringRef) {
           hitResult.label.toUpperCase(),
           hitResult.label.toLowerCase(),
         );
+        playJudgement(hitResult.label);
         triggerFlash("hit");
       } else {
         setCombo(0);
@@ -309,6 +317,7 @@ export function useRhythmGame(mountRef, ringRef) {
           },
         }));
         showJudgement("MISS", "miss");
+        playJudgement("miss");
         triggerFlash("miss");
       }
     };
