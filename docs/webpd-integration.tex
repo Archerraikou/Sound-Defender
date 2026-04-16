@@ -1,0 +1,457 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{booktabs}
+
+\geometry{margin=2.5cm}
+
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{0000CC}
+\definecolor{string}{HTML}{CC0000}
+\definecolor{comment}{HTML}{666666}
+\definecolor{number}{HTML}{007700}
+
+\lstdefinestyle{js}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{keyword}\bfseries,
+  stringstyle=\color{string},
+  commentstyle=\color{comment}\itshape,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  xleftmargin=8pt,
+  xrightmargin=8pt,
+  captionpos=b,
+  keywords={import, from, export, default, const, let, var, async, await,
+            return, function, if, else, new, true, false, null, undefined,
+            try, catch, class, this},
+  morestring=[b]',
+  morestring=[b]",
+  morestring=[b]`,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  showstringspaces=false,
+}
+
+\lstdefinestyle{html}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{keyword}\bfseries,
+  stringstyle=\color{string},
+  commentstyle=\color{comment}\itshape,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  xleftmargin=8pt,
+  xrightmargin=8pt,
+  captionpos=b,
+  keywords={html, head, body, div, script, meta, link, title, h1, p, label, input, strong},
+  morestring=[b]",
+  morecomment=[s]{<!--}{-->},
+  showstringspaces=false,
+}
+
+\lstdefinestyle{pd}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  commentstyle=\color{comment}\itshape,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  xleftmargin=8pt,
+  xrightmargin=8pt,
+  captionpos=b,
+  showstringspaces=false,
+}
+
+\title{\textbf{WebPd Integration in a React/Vite Application}\\
+\large Running Pure Data patches in the browser}
+\author{Sound Defender}
+\date{}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────
+\section{Overview}
+
+This document explains how a Pure Data (\texttt{.pd}) patch is integrated into a React web application using the \textbf{WebPd} library. WebPd is a compiler that translates Pure Data patches into WebAssembly (\texttt{.wasm}) modules, which can then be run in the browser via the Web Audio API.
+
+The integration consists of the following pieces:
+
+\begin{itemize}
+  \item \texttt{public/simple-synth.pd} — the Pure Data patch defining the audio graph
+  \item \texttt{public/patch.wasm} — the compiled WebAssembly output of the patch
+  \item \texttt{index.html} — the HTML entry point
+  \item \texttt{src/main.jsx} — the React application bootstrap
+  \item \texttt{src/App.jsx} — the root component and router
+  \item \texttt{src/pages/TestPd.jsx} — the page that loads and controls the patch
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────
+\section{The Pure Data Patch}
+
+\subsection{File: \texttt{public/simple-synth.pd}}
+
+\begin{lstlisting}[style=pd, caption={simple-synth.pd}]
+#N canvas 0 0 450 300 10;
+#X obj 50 40 nbx 5 14 -1e+37 1e+37 0 0 empty empty empty 0 -8 0 10 -262144 -1 -1 440 256;
+#X obj 50 80 osc~;
+#X obj 50 120 *~ 0.1;
+#X obj 50 160 dac~;
+#X connect 0 0 1 0;
+#X connect 1 0 2 0;
+#X connect 2 0 3 0;
+#X connect 2 0 3 1;
+\end{lstlisting}
+
+\subsection{Patch Structure}
+
+The patch defines four objects connected in a linear audio chain:
+
+\begin{center}
+\begin{tabular}{@{}cll@{}}
+\toprule
+\textbf{Index} & \textbf{Object} & \textbf{Purpose} \\
+\midrule
+0 & \texttt{nbx} & Number box — receives the frequency value from JavaScript \\
+1 & \texttt{osc\textasciitilde} & Sine wave oscillator — generates audio at the given frequency \\
+2 & \texttt{*\textasciitilde{} 0.1} & Multiplies signal amplitude by 0.1 (volume control) \\
+3 & \texttt{dac\textasciitilde} & Digital-to-analogue converter — sends audio to speakers \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The connections defined by the \texttt{\#X connect} lines are:
+
+\begin{itemize}
+  \item \texttt{0 0 1 0} — \texttt{nbx} outlet 0 $\rightarrow$ \texttt{osc\textasciitilde} inlet 0 (sets frequency)
+  \item \texttt{1 0 2 0} — \texttt{osc\textasciitilde} outlet 0 $\rightarrow$ \texttt{*\textasciitilde} inlet 0
+  \item \texttt{2 0 3 0} — \texttt{*\textasciitilde} outlet 0 $\rightarrow$ \texttt{dac\textasciitilde} left channel
+  \item \texttt{2 0 3 1} — \texttt{*\textasciitilde} outlet 0 $\rightarrow$ \texttt{dac\textasciitilde} right channel
+\end{itemize}
+
+\subsection{Why \texttt{nbx} and not \texttt{receive}}
+
+WebPd only exposes GUI objects (\texttt{nbx}, \texttt{bang}, \texttt{toggle}, sliders) as \emph{message receivers} — entry points through which JavaScript can send values into the patch. Plain \texttt{[receive name]} objects are treated as \emph{message senders} (patch $\rightarrow$ JavaScript), not the other way around. Using \texttt{nbx} as the frequency input is therefore the correct approach.
+
+\subsection{Compiling the Patch}
+
+The patch is pre-compiled to WebAssembly using the WebPd command-line interface before the application runs. This avoids runtime compilation in the browser.
+
+\begin{lstlisting}[style=pd, caption={Compiling the patch to WASM}]
+npx webpd -i public/simple-synth.pd -o /tmp/webpd-out -f app
+\end{lstlisting}
+
+This produces \texttt{patch.wasm} and a reference \texttt{index.html} listing all node IDs available for JavaScript communication. The \texttt{patch.wasm} file is then copied to \texttt{public/} so Vite serves it as a static asset. The reference HTML showed that \texttt{nbx} was assigned the node ID \texttt{n\_0\_0}.
+
+% ─────────────────────────────────────────────────────────────
+\section{HTML Entry Point}
+
+\subsection{File: \texttt{index.html}}
+
+\begin{lstlisting}[style=html, caption={index.html}]
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>sound-defender</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+\end{lstlisting}
+
+This is the standard Vite HTML template. The \texttt{div\#root} element is where React mounts the application. The WebPd runtime is imported directly from the \texttt{webpd} npm package inside the React components rather than as a separate script tag, keeping all dependencies managed by the module bundler.
+
+% ─────────────────────────────────────────────────────────────
+\section{React Bootstrap}
+
+\subsection{File: \texttt{src/main.jsx}}
+
+\begin{lstlisting}[style=js, caption={main.jsx}]
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+\end{lstlisting}
+
+This is the standard React 18 entry point. \texttt{createRoot} mounts the React tree into the \texttt{div\#root} element from \texttt{index.html}. \texttt{StrictMode} enables additional development-time checks.
+
+% ─────────────────────────────────────────────────────────────
+\section{Root Component and Routing}
+
+\subsection{File: \texttt{src/App.jsx}}
+
+\begin{lstlisting}[style=js, caption={App.jsx}]
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import TestPd from './pages/TestPd'
+import './App.css'
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/test-pd" element={<TestPd />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+
+export default App
+\end{lstlisting}
+
+\texttt{App.jsx} sets up client-side routing using \texttt{react-router-dom}. The \texttt{BrowserRouter} component uses the HTML5 History API so URLs look like \texttt{/test-pd} rather than hash-based paths. A single route maps \texttt{/test-pd} to the \texttt{TestPd} page component. Additional game routes can be added here alongside it.
+
+% ─────────────────────────────────────────────────────────────
+\section{The TestPd Page}
+
+\subsection{File: \texttt{src/pages/TestPd.jsx}}
+
+This component handles the full lifecycle of the WebPd integration: initialisation, starting playback on user interaction, sending messages to the patch, and rendering the piano key UI.
+
+\subsubsection{Imports}
+
+\begin{lstlisting}[style=js, caption={Imports}]
+import { useState, useRef, useEffect } from 'react'
+import { Browser as WebPdRuntime } from 'webpd'
+\end{lstlisting}
+
+The \texttt{webpd} package exports its browser-specific API under the \texttt{Browser} namespace, which is aliased here as \texttt{WebPdRuntime} for clarity. The three functions used from it are \texttt{initialize}, \texttt{run}, and \texttt{defaultSettingsForRun}.
+
+\subsubsection{The PianoKey Component}
+
+\begin{lstlisting}[style=js, caption={PianoKey component}]
+function PianoKey({ pressed, onPress, onRelease }) {
+  return (
+    <div
+      style={{ position: 'relative', width: '70px', height: '200px',
+               cursor: 'pointer', userSelect: 'none' }}
+      onMouseDown={onPress}
+      onMouseUp={onRelease}
+      onMouseLeave={onRelease}
+      onTouchStart={(e) => { e.preventDefault(); onPress() }}
+      onTouchEnd={onRelease}
+    >
+      {/* Fixed shadow layer */}
+      <div style={{
+        position: 'absolute', bottom: 0, width: '100%', height: '100%',
+        backgroundColor: '#bbb', borderRadius: '0 0 6px 6px',
+        boxShadow: '0 4px 0 #888',
+      }} />
+      {/* Animated key face */}
+      <div style={{
+        position: 'absolute',
+        top: pressed ? '8px' : '0px',
+        width: '100%', height: 'calc(100% - 4px)',
+        backgroundColor: pressed ? '#e8e8e8' : '#fff',
+        borderRadius: '0 0 5px 5px',
+        border: '1px solid #ccc', borderTop: 'none',
+        boxShadow: pressed ? '0 2px 0 #aaa' : '0 6px 0 #aaa',
+        transition: 'top 0.04s ease, box-shadow 0.04s ease',
+      }} />
+    </div>
+  )
+}
+\end{lstlisting}
+
+\texttt{PianoKey} is a presentational component. It renders two stacked \texttt{div} elements:
+
+\begin{itemize}
+  \item The \textbf{shadow layer} is absolutely positioned and never moves. It creates the illusion of depth beneath the key.
+  \item The \textbf{key face} shifts 8px downward when \texttt{pressed} is true and its \texttt{box-shadow} is reduced, simulating a physical key press. Both transitions are animated over 40ms.
+\end{itemize}
+
+Mouse and touch events are both handled. \texttt{onMouseLeave} ensures the key is released if the cursor moves away while held, preventing a stuck-pressed state.
+
+\subsubsection{State and Refs}
+
+\begin{lstlisting}[style=js, caption={State and refs in TestPd}]
+const [status, setStatus] = useState('Initializing...')
+const [pressed, setPressed] = useState(false)
+const [freq, setFreq] = useState(440)
+const audioCtxRef = useRef(null)
+const pdNodeRef = useRef(null)
+\end{lstlisting}
+
+\begin{itemize}
+  \item \texttt{status} — a string displayed to the user describing the current state of the audio engine.
+  \item \texttt{pressed} — whether the piano key is currently held down, used to drive the key animation.
+  \item \texttt{freq} — the frequency in Hz to send to the patch, controlled by the number input.
+  \item \texttt{audioCtxRef} — a ref holding the \texttt{AudioContext} instance. A ref is used rather than state because changes to it should not trigger re-renders.
+  \item \texttt{pdNodeRef} — a ref holding the running \texttt{WebPdWorkletNode} once started.
+\end{itemize}
+
+\subsubsection{Initialisation}
+
+\begin{lstlisting}[style=js, caption={useEffect initialisation}]
+useEffect(() => {
+  const initPd = async () => {
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+      audioCtxRef.current = audioCtx
+      await WebPdRuntime.initialize(audioCtx)
+      const response = await fetch('/patch.wasm')
+      audioCtxRef.current._patch = await response.arrayBuffer()
+      setStatus('Click the key to start!')
+    } catch (err) {
+      setStatus(`Error: ${err.message}`)
+      console.error(err)
+    }
+  }
+  initPd()
+}, [])
+\end{lstlisting}
+
+This effect runs once on mount. It performs two tasks:
+
+\begin{enumerate}
+  \item \textbf{Registers the AudioWorklet} — \texttt{WebPdRuntime.initialize(audioCtx)} loads the WebPd processor code into the browser's audio thread as an \texttt{AudioWorkletNode}.
+  \item \textbf{Fetches the compiled patch} — \texttt{patch.wasm} is fetched as an \texttt{ArrayBuffer} and stored on the \texttt{AudioContext} ref for later use. The patch is not \emph{started} here because browsers require audio to begin from a direct user gesture (a click or key press), not on page load.
+\end{enumerate}
+
+\subsubsection{Lazy Audio Start}
+
+\begin{lstlisting}[style=js, caption={ensureStarted}]
+const ensureStarted = async () => {
+  const audioCtx = audioCtxRef.current
+  if (pdNodeRef.current) return
+  if (audioCtx.state === 'suspended') await audioCtx.resume()
+  const node = await WebPdRuntime.run(
+    audioCtx,
+    audioCtx._patch,
+    WebPdRuntime.defaultSettingsForRun('/patch.wasm'),
+  )
+  node.connect(audioCtx.destination)
+  pdNodeRef.current = node
+  setStatus('Running!')
+}
+\end{lstlisting}
+
+\texttt{ensureStarted} is called on the first key press. It is idempotent — if \texttt{pdNodeRef.current} is already set, it returns immediately. On the first call it:
+
+\begin{enumerate}
+  \item Resumes the \texttt{AudioContext} if it was suspended (browsers suspend audio contexts created before any user interaction).
+  \item Calls \texttt{WebPdRuntime.run} with the compiled \texttt{ArrayBuffer}, which creates a \texttt{WebPdWorkletNode} and posts the WASM binary to the audio thread.
+  \item Connects the node to \texttt{audioCtx.destination}, routing its audio output to the speakers.
+\end{enumerate}
+
+\subsubsection{Sending Messages to the Patch}
+
+\begin{lstlisting}[style=js, caption={sendFreq}]
+const sendFreq = (value) => {
+  pdNodeRef.current.port.postMessage({
+    type: 'io:messageReceiver',
+    payload: { nodeId: 'n_0_0', portletId: '0', message: [value] },
+  })
+}
+\end{lstlisting}
+
+Communication from JavaScript to the patch goes through the \texttt{AudioWorkletNode}'s \texttt{MessagePort}. The message format is:
+
+\begin{itemize}
+  \item \texttt{type: 'io:messageReceiver'} — tells the worklet processor this is an inbound message to a patch object.
+  \item \texttt{nodeId: 'n\_0\_0'} — the compile-time ID assigned to the \texttt{nbx} object (object index 0 in canvas 0).
+  \item \texttt{portletId: '0'} — the first (and only) inlet of the \texttt{nbx}.
+  \item \texttt{message: [value]} — an array containing the frequency value. Arrays can contain any mix of numbers and strings.
+\end{itemize}
+
+Sending \texttt{0} as the frequency effectively silences the oscillator, which is used on key release.
+
+\subsubsection{Press and Release Handlers}
+
+\begin{lstlisting}[style=js, caption={handlePress and handleRelease}]
+const handlePress = async () => {
+  await ensureStarted()
+  sendFreq(freq)
+  setPressed(true)
+}
+
+const handleRelease = () => {
+  if (!pressed) return
+  sendFreq(0)
+  setPressed(false)
+}
+\end{lstlisting}
+
+\texttt{handlePress} starts the audio engine on first use, sends the current frequency to the patch, and sets \texttt{pressed} to true to animate the key downward. \texttt{handleRelease} sends frequency 0 to stop the oscillator and resets the key animation. The early return in \texttt{handleRelease} prevents double-firing when both \texttt{onMouseUp} and \texttt{onMouseLeave} would otherwise both call it.
+
+\subsubsection{Rendered Output}
+
+\begin{lstlisting}[style=js, caption={JSX returned by TestPd}]
+return (
+  <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
+    <h1>WebPd Test</h1>
+    <p>Status: <strong>{status}</strong></p>
+
+    <div style={{ marginTop: '2rem', display: 'flex',
+                  alignItems: 'center', gap: '1rem' }}>
+      <label>
+        Frequency (Hz):
+        <input
+          type="number"
+          min="20"
+          max="20000"
+          value={freq}
+          onChange={e => setFreq(parseFloat(e.target.value))}
+          style={{ marginLeft: '0.5rem', width: '90px',
+                   fontSize: '1rem', padding: '0.25rem' }}
+        />
+      </label>
+    </div>
+
+    <div style={{ marginTop: '2rem' }}>
+      <PianoKey
+        pressed={pressed}
+        onPress={handlePress}
+        onRelease={handleRelease}
+      />
+    </div>
+  </div>
+)
+\end{lstlisting}
+
+The rendered page consists of three elements:
+
+\begin{itemize}
+  \item A \textbf{status line} showing the current state of the audio engine.
+  \item A \textbf{number input} bound to the \texttt{freq} state, accepting values from 20 Hz (lower limit of human hearing) to 20000 Hz (upper limit). Changing this value does not immediately affect audio — it only takes effect the next time the key is pressed.
+  \item A \textbf{PianoKey} component wired to the press and release handlers.
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────
+\section{Data Flow Summary}
+
+The following sequence describes what happens from page load to a key press:
+
+\begin{enumerate}
+  \item \textbf{Page loads} — \texttt{main.jsx} mounts \texttt{App}, the router renders \texttt{TestPd}.
+  \item \textbf{useEffect fires} — an \texttt{AudioContext} is created, the WebPd worklet is registered, and \texttt{patch.wasm} is fetched and stored in memory.
+  \item \textbf{User sets frequency} — the number input updates the \texttt{freq} state in React.
+  \item \textbf{User presses the key} — \texttt{handlePress} calls \texttt{ensureStarted}, which resumes the \texttt{AudioContext} and starts the WASM patch running in the audio thread.
+  \item \textbf{Frequency is sent} — \texttt{sendFreq(freq)} posts a message through the worklet's \texttt{MessagePort}. The WASM patch receives it at the \texttt{nbx} inlet, which drives the \texttt{osc\textasciitilde} frequency. Audio begins playing.
+  \item \textbf{User releases the key} — \texttt{handleRelease} sends frequency 0, silencing the oscillator. The key animation returns to its resting position.
+\end{enumerate}
+
+\end{document}
